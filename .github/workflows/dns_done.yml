@@ -57,7 +57,7 @@ jobs:
           key: ${{ runner.os }}-puredns-wireguard-v1
 
       # ----------------------------------------------------------------------
-      # تثبيت الأدوات (تم استبدال OpenVPN بـ WireGuard)
+      # تثبيت الأدوات (مع إضافة openresolv عشان DNS)
       # ----------------------------------------------------------------------
       - name: Install Dependencies & Tools (if cache miss)
         run: |
@@ -68,8 +68,7 @@ jobs:
 
           if [ "$NEED_INSTALL" = true ]; then
             echo "🛠️  Installing required packages (MassDNS, PureDNS, WireGuard)..."
-            # تم تغيير openvpn إلى wireguard-tools
-            sudo apt-get update && sudo apt-get install -y git build-essential libpcap-dev curl wireguard-tools
+            sudo apt-get update && sudo apt-get install -y git build-essential libpcap-dev curl wireguard-tools openresolv
 
             # تثبيت MassDNS
             git clone https://github.com/blechschmidt/massdns.git
@@ -114,16 +113,24 @@ jobs:
           wc -l chunk_*.txt
 
       # ----------------------------------------------------------------------
-      # ⚡ الاتصال بـ WireGuard بدلاً من OpenVPN
-      # ملاحظة: يجب أن يحتوي الـ Secret (VPN_CONFIG) على ملف إعدادات WireGuard
-      # بصيغة .conf مشفر بـ base64 (بدلاً من ملف .ovpn)
+      # ⚡ الاتصال بـ WireGuard (يختار VPN حسب رقم القطعة)
       # ----------------------------------------------------------------------
       - name: Connect to WireGuard VPN
+        env:
+          VPN_0: ${{ secrets.VPN_CONFIG }}        # القطعة 0
+          VPN_1: ${{ secrets.VPN_CONFIG_1 }}      # القطعة 1
+          VPN_2: ${{ secrets.VPN_CONFIG_2 }}      # القطعة 2
+          CHUNK: ${{ matrix.chunk }}
         run: |
-          if [ -n "${{ secrets.VPN_CONFIG }}" ]; then
-            echo "🔐 Decoding WireGuard configuration..."
-            # فك تشفير الإعدادات (متوقع أن يكون ملف wg0.conf مشفر بـ base64)
-            echo "${{ secrets.VPN_CONFIG }}" | base64 -d > wg0.conf
+          # اختيار الكونفيغ حسب رقم القطعة
+          if [ "$CHUNK" -eq 0 ]; then CONFIG="$VPN_0"; fi
+          if [ "$CHUNK" -eq 1 ]; then CONFIG="$VPN_1"; fi
+          if [ "$CHUNK" -eq 2 ]; then CONFIG="$VPN_2"; fi
+
+          if [ -n "$CONFIG" ]; then
+            echo "🔐 Decoding WireGuard configuration for chunk $CHUNK..."
+            echo "$CONFIG" | base64 -d > wg0.conf
+            sudo chmod 600 wg0.conf   # إزالة التحذير world accessible
 
             echo "🔄 Bringing up WireGuard interface..."
             sudo wg-quick up ./wg0.conf 2>&1 | tee /tmp/wg.log
@@ -131,9 +138,7 @@ jobs:
             echo "⏳ Waiting for WireGuard tunnel to establish..."
             VPN_UP=false
             for i in {1..30}; do
-              # التحقق من وجود واجهة wg0 ووجود نقل بيانات (handshake) أو عنوان IP
               if ip addr show wg0 >/dev/null 2>&1; then
-                # التحقق من أن الـ VPN أعطانا عنوان IP (ليس 0.0.0.0)
                 WG_IP=$(ip -4 addr show wg0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
                 if [ -n "$WG_IP" ] && [ "$WG_IP" != "0.0.0.0" ]; then
                   VPN_UP=true
@@ -144,7 +149,6 @@ jobs:
             done
 
             if [ "$VPN_UP" = true ]; then
-              # التحقق من وصول الإنترنت عبر الـ VPN
               PUBLIC_IP=$(curl -s --max-time 5 --interface wg0 ifconfig.me || curl -s --max-time 5 --interface wg0 icanhazip.com)
               echo "✅ WireGuard tunnel is up. Public IP through VPN: $PUBLIC_IP"
               echo "🔍 Interface details:"
@@ -156,11 +160,11 @@ jobs:
               cat /tmp/wg.log || true
             fi
           else
-            echo "⚠️  VPN_CONFIG secret not found. Skipping VPN (requests will use GitHub's public IP)."
+            echo "⚠️  No VPN config found for chunk $CHUNK. Skipping VPN."
           fi
 
       # ----------------------------------------------------------------------
-      # تشغيل PureDNS Brute Force
+      # تشغيل PureDNS Brute Force (تم حذف --wildcard-threshold)
       # ----------------------------------------------------------------------
       - name: Execute PureDNS Brute Force
         env:
@@ -189,7 +193,6 @@ jobs:
           cat "$WORDLIST" | puredns bruteforce "$TARGET" \
             -r resolvers.txt \
             --rate-limit "$RATE" \
-            --wildcard-threshold 5 \
             --wildcard-tests 10 \
             -w "found_subs_${CHUNK}.txt" \
             --debug
@@ -220,6 +223,9 @@ jobs:
           name: discovered-subs-chunk-${{ matrix.chunk }}
           path: live_subdomains_${{ matrix.chunk }}.txt
 
+  # --------------------------------------------------------------------------
+  # دمج جميع النتائج
+  # --------------------------------------------------------------------------
   merge-results:
     name: Merge All Results
     needs: bruteforce
