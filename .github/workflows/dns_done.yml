@@ -10,7 +10,7 @@ on:
       wordlist_url:
         description: 'URL of the subdomain wordlist (raw text file)'
         required: false
-        default: 'https://github.com/nano177/subs/releases/download/sub/part_01.txt'
+        default: 'https://github.com/abdallahmahmod2070-byte/subs/releases/download/sub/part_00.txt'
       resolver_url:
         description: 'URL of the resolver list (raw text file)'
         required: false
