@@ -1,4 +1,4 @@
-name: PureDNS Brute Force Scanner (Optimized + VPN)
+name: PureDNS Brute Force Scanner (Optimized + WireGuard)
 
 on:
   workflow_dispatch:
@@ -10,8 +10,7 @@ on:
       wordlist_url:
         description: 'URL of the subdomain wordlist (raw text file)'
         required: false
-        # تم التعديل: الرابط الجديد للـ Release الخاص بك
-        default: 'https://github.com/abdallahmahmod2070-byte/subs/releases/download/sub/part_00.txt'
+        default: 'https://github.com/nano177/subs/releases/download/sub/part_01.txt'
       resolver_url:
         description: 'URL of the resolver list (raw text file)'
         required: false
@@ -42,10 +41,9 @@ jobs:
           go-version: '>=1.21.0'
 
       # ----------------------------------------------------------------------
-      # الكاش المطور: يخزن Go Modules، Binaries الخاصة بالأدوات، وأيضاً OpenVPN
-      # ملاحظة: تمت إضافة /usr/local/bin/puredns للمسارات (كانت ناقصة)
+      # الكاش المطور: خزن أدوات WireGuard بدلاً من OpenVPN
       # ----------------------------------------------------------------------
-      - name: Cache Tools (Go, MassDNS, PureDNS, OpenVPN)
+      - name: Cache Tools (Go, MassDNS, PureDNS, WireGuard)
         uses: actions/cache@v4
         id: cache-tools
         with:
@@ -54,22 +52,24 @@ jobs:
             ~/go/bin
             /usr/local/bin/massdns
             /usr/local/bin/puredns
-            /usr/sbin/openvpn
-          key: ${{ runner.os }}-puredns-vpn-v3
+            /usr/bin/wg
+            /usr/bin/wg-quick
+          key: ${{ runner.os }}-puredns-wireguard-v1
 
       # ----------------------------------------------------------------------
-      # تثبيت الأدوات إذا كانت غير موجودة في الكاش
+      # تثبيت الأدوات (تم استبدال OpenVPN بـ WireGuard)
       # ----------------------------------------------------------------------
       - name: Install Dependencies & Tools (if cache miss)
         run: |
           NEED_INSTALL=false
-          if [ ! -f /usr/local/bin/massdns ] || [ ! -f /usr/local/bin/puredns ] || [ ! -f /usr/sbin/openvpn ]; then
+          if [ ! -f /usr/local/bin/massdns ] || [ ! -f /usr/local/bin/puredns ] || [ ! -f /usr/bin/wg ]; then
             NEED_INSTALL=true
           fi
 
           if [ "$NEED_INSTALL" = true ]; then
-            echo "🛠️  Installing required packages (MassDNS, PureDNS, OpenVPN)..."
-            sudo apt-get update && sudo apt-get install -y git build-essential libpcap-dev curl openvpn
+            echo "🛠️  Installing required packages (MassDNS, PureDNS, WireGuard)..."
+            # تم تغيير openvpn إلى wireguard-tools
+            sudo apt-get update && sudo apt-get install -y git build-essential libpcap-dev curl wireguard-tools
 
             # تثبيت MassDNS
             git clone https://github.com/blechschmidt/massdns.git
@@ -82,11 +82,11 @@ jobs:
             go install github.com/d3mondev/puredns/v2@latest
             sudo cp $(go env GOPATH)/bin/puredns /usr/local/bin/
           else
-            echo "✅ All tools (MassDNS, PureDNS, OpenVPN) are already cached."
+            echo "✅ All tools (MassDNS, PureDNS, WireGuard) are already cached."
           fi
 
       # ----------------------------------------------------------------------
-      # تحميل قائمة Resolvers (جديدة في كل مرة لضمان الحداثة)
+      # تحميل قائمة Resolvers
       # ----------------------------------------------------------------------
       - name: Download Resolver List
         run: |
@@ -94,7 +94,7 @@ jobs:
           echo "Total resolvers: $(wc -l < resolvers.txt)"
 
       # ----------------------------------------------------------------------
-      # تحميل الـ Wordlist من الرابط المحدد
+      # تحميل الـ Wordlist
       # ----------------------------------------------------------------------
       - name: Download Wordlist
         run: |
@@ -102,7 +102,7 @@ jobs:
           echo "Wordlist size: $(wc -l < subdomains.txt) lines"
 
       # ----------------------------------------------------------------------
-      # تقسيم الـ Wordlist إلى 3 أجزاء للمعالجة المتوازية
+      # تقسيم الـ Wordlist إلى 3 أجزاء
       # ----------------------------------------------------------------------
       - name: Split Wordlist into Chunks
         run: |
@@ -114,47 +114,46 @@ jobs:
           wc -l chunk_*.txt
 
       # ----------------------------------------------------------------------
-      # الاتصال بالـ VPN - يعمل على كل Runner على حدة
-      # تم إصلاح فحص الاتصال: كان بيتحقق فقط من وصول الإنترنت (بيرجع IP حتى
-      # من غير VPN)، دلوقتي بيتحقق من لوج الـ openvpn وواجهة tun0 فعليًا
+      # ⚡ الاتصال بـ WireGuard بدلاً من OpenVPN
+      # ملاحظة: يجب أن يحتوي الـ Secret (VPN_CONFIG) على ملف إعدادات WireGuard
+      # بصيغة .conf مشفر بـ base64 (بدلاً من ملف .ovpn)
       # ----------------------------------------------------------------------
-      - name: Connect to VPN
+      - name: Connect to WireGuard VPN
         run: |
           if [ -n "${{ secrets.VPN_CONFIG }}" ]; then
-            echo "🔐 Decoding VPN configuration..."
-            echo "${{ secrets.VPN_CONFIG }}" | base64 -d > vpn.ovpn
+            echo "🔐 Decoding WireGuard configuration..."
+            # فك تشفير الإعدادات (متوقع أن يكون ملف wg0.conf مشفر بـ base64)
+            echo "${{ secrets.VPN_CONFIG }}" | base64 -d > wg0.conf
 
-            if [ -n "${{ secrets.VPN_USERNAME }}" ] && [ -n "${{ secrets.VPN_PASSWORD }}" ]; then
-              echo "${{ secrets.VPN_USERNAME }}" > creds.txt
-              echo "${{ secrets.VPN_PASSWORD }}" >> creds.txt
-              chmod 600 creds.txt
-              echo "🔑 Using username/password authentication."
-              sudo openvpn --config vpn.ovpn --auth-user-pass creds.txt --auth-nocache --daemon --log-append /tmp/vpn.log
-            else
-              echo "🔑 Using certificate-only authentication (no user/pass)."
-              sudo openvpn --config vpn.ovpn --daemon --log-append /tmp/vpn.log
-            fi
+            echo "🔄 Bringing up WireGuard interface..."
+            sudo wg-quick up ./wg0.conf 2>&1 | tee /tmp/wg.log
 
-            echo "⏳ Waiting for VPN tunnel to establish..."
+            echo "⏳ Waiting for WireGuard tunnel to establish..."
             VPN_UP=false
             for i in {1..30}; do
-              if sudo grep -q "Initialization Sequence Completed" /tmp/vpn.log 2>/dev/null && ip addr show tun0 >/dev/null 2>&1; then
-                VPN_UP=true
-                break
+              # التحقق من وجود واجهة wg0 ووجود نقل بيانات (handshake) أو عنوان IP
+              if ip addr show wg0 >/dev/null 2>&1; then
+                # التحقق من أن الـ VPN أعطانا عنوان IP (ليس 0.0.0.0)
+                WG_IP=$(ip -4 addr show wg0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
+                if [ -n "$WG_IP" ] && [ "$WG_IP" != "0.0.0.0" ]; then
+                  VPN_UP=true
+                  break
+                fi
               fi
               sleep 2
             done
 
-            # مسح ملف الكريدنشلز بعد الاستخدام مباشرة
-            rm -f creds.txt
-
             if [ "$VPN_UP" = true ]; then
-              PUBLIC_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 icanhazip.com)
-              echo "✅ VPN tunnel is up. Public IP through VPN: $PUBLIC_IP"
+              # التحقق من وصول الإنترنت عبر الـ VPN
+              PUBLIC_IP=$(curl -s --max-time 5 --interface wg0 ifconfig.me || curl -s --max-time 5 --interface wg0 icanhazip.com)
+              echo "✅ WireGuard tunnel is up. Public IP through VPN: $PUBLIC_IP"
+              echo "🔍 Interface details:"
+              ip addr show wg0
+              sudo wg show wg0
             else
-              echo "❌ VPN tunnel did not come up within 60s. Traffic will use GitHub's public IP instead."
-              echo "--- Last VPN log lines ---"
-              sudo tail -n 30 /tmp/vpn.log 2>/dev/null || true
+              echo "❌ WireGuard tunnel did not come up within 60s. Traffic will use GitHub's public IP instead."
+              echo "--- Last WireGuard log lines ---"
+              cat /tmp/wg.log || true
             fi
           else
             echo "⚠️  VPN_CONFIG secret not found. Skipping VPN (requests will use GitHub's public IP)."
@@ -171,7 +170,6 @@ jobs:
         run: |
           WORDLIST="chunk_${CHUNK}.txt"
 
-          # التحقق من صحة المدخلات
           if [ -z "$TARGET" ]; then
             echo "❌ Error: TARGET domain is empty. Please provide a domain."
             exit 1
@@ -197,9 +195,7 @@ jobs:
             --debug
 
       # ----------------------------------------------------------------------
-      # معالجة النتائج وفرزها
-      # تم إصلاح: الخطوة دي كانت من غير env CHUNK فكان بيقرأ ملف اسمه
-      # found_subs_.txt (فاضي) بدل found_subs_0.txt / _1.txt / _2.txt
+      # معالجة النتائج
       # ----------------------------------------------------------------------
       - name: Process Results
         env:
@@ -216,7 +212,7 @@ jobs:
           fi
 
       # ----------------------------------------------------------------------
-      # رفع نتائج القطعة الحالية
+      # رفع النتائج
       # ----------------------------------------------------------------------
       - name: Upload Discovered Subdomains (Chunk ${{ matrix.chunk }})
         uses: actions/upload-artifact@v4
@@ -224,9 +220,6 @@ jobs:
           name: discovered-subs-chunk-${{ matrix.chunk }}
           path: live_subdomains_${{ matrix.chunk }}.txt
 
-  # --------------------------------------------------------------------------
-  # دمج جميع النتائج في ملف واحد
-  # --------------------------------------------------------------------------
   merge-results:
     name: Merge All Results
     needs: bruteforce
