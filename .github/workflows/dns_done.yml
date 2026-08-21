@@ -1,4 +1,4 @@
-name: PureDNS Brute Force Scanner (Optimized + WireGuard)
+name: PureDNS Brute Force Scanner (Optimized)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       wordlist_url:
         description: 'URL of the subdomain wordlist (raw text file)'
         required: false
-        default: 'https://github.com/abdallahmahmod2070-byte/subs/releases/download/sub/part_00.txt'
+        default: 'https://github.com/osmanssano/subs/releases/download/sub/part_02.txt'
       resolver_url:
         description: 'URL of the resolver list (raw text file)'
         required: false
@@ -40,69 +40,45 @@ jobs:
         with:
           go-version: '>=1.21.0'
 
-      # ----------------------------------------------------------------------
-      # الكاش المطور: خزن أدوات WireGuard بدلاً من OpenVPN
-      # ----------------------------------------------------------------------
-      - name: Cache Tools (Go, MassDNS, PureDNS, WireGuard)
+      - name: Cache Go Modules and Binaries
         uses: actions/cache@v4
-        id: cache-tools
+        id: cache-bin
         with:
           path: |
             ~/go/pkg/mod
             ~/go/bin
             /usr/local/bin/massdns
             /usr/local/bin/puredns
-            /usr/bin/wg
-            /usr/bin/wg-quick
-          key: ${{ runner.os }}-puredns-wireguard-v1
+          key: ${{ runner.os }}-puredns-v2
 
-      # ----------------------------------------------------------------------
-      # تثبيت الأدوات (مع إضافة openresolv عشان DNS)
-      # ----------------------------------------------------------------------
-      - name: Install Dependencies & Tools (if cache miss)
+      - name: Install MassDNS & PureDNS (if cache miss)
         run: |
-          NEED_INSTALL=false
-          if [ ! -f /usr/local/bin/massdns ] || [ ! -f /usr/local/bin/puredns ] || [ ! -f /usr/bin/wg ]; then
-            NEED_INSTALL=true
-          fi
+          if [ ! -f /usr/local/bin/massdns ] || [ ! -f /usr/local/bin/puredns ]; then
+            echo "Binaries not found in cache – installing..."
+            sudo apt-get update && sudo apt-get install -y git build-essential libpcap-dev curl
 
-          if [ "$NEED_INSTALL" = true ]; then
-            echo "🛠️  Installing required packages (MassDNS, PureDNS, WireGuard)..."
-            sudo apt-get update && sudo apt-get install -y git build-essential libpcap-dev curl wireguard-tools openresolv
-
-            # تثبيت MassDNS
             git clone https://github.com/blechschmidt/massdns.git
             cd massdns
             make -j$(nproc)
             sudo cp bin/massdns /usr/local/bin/
             cd .. && rm -rf massdns
 
-            # تثبيت PureDNS
             go install github.com/d3mondev/puredns/v2@latest
             sudo cp $(go env GOPATH)/bin/puredns /usr/local/bin/
           else
-            echo "✅ All tools (MassDNS, PureDNS, WireGuard) are already cached."
+            echo "MassDNS and PureDNS are already cached."
           fi
 
-      # ----------------------------------------------------------------------
-      # تحميل قائمة Resolvers
-      # ----------------------------------------------------------------------
       - name: Download Resolver List
         run: |
           curl -s -L "${{ inputs.resolver_url }}" -o resolvers.txt
           echo "Total resolvers: $(wc -l < resolvers.txt)"
 
-      # ----------------------------------------------------------------------
-      # تحميل الـ Wordlist
-      # ----------------------------------------------------------------------
       - name: Download Wordlist
         run: |
           curl -s -L "${{ inputs.wordlist_url }}" -o subdomains.txt
           echo "Wordlist size: $(wc -l < subdomains.txt) lines"
 
-      # ----------------------------------------------------------------------
-      # تقسيم الـ Wordlist إلى 3 أجزاء
-      # ----------------------------------------------------------------------
       - name: Split Wordlist into Chunks
         run: |
           split -n l/3 -d -a 1 subdomains.txt chunk_
@@ -112,60 +88,6 @@ jobs:
           echo "Chunk sizes:"
           wc -l chunk_*.txt
 
-      # ----------------------------------------------------------------------
-      # ⚡ الاتصال بـ WireGuard (يختار VPN حسب رقم القطعة)
-      # ----------------------------------------------------------------------
-      - name: Connect to WireGuard VPN
-        env:
-          VPN_0: ${{ secrets.VPN_CONFIG }}        # القطعة 0
-          VPN_1: ${{ secrets.VPN_CONFIG_1 }}      # القطعة 1
-          VPN_2: ${{ secrets.VPN_CONFIG_2 }}      # القطعة 2
-          CHUNK: ${{ matrix.chunk }}
-        run: |
-          # اختيار الكونفيغ حسب رقم القطعة
-          if [ "$CHUNK" -eq 0 ]; then CONFIG="$VPN_0"; fi
-          if [ "$CHUNK" -eq 1 ]; then CONFIG="$VPN_1"; fi
-          if [ "$CHUNK" -eq 2 ]; then CONFIG="$VPN_2"; fi
-
-          if [ -n "$CONFIG" ]; then
-            echo "🔐 Decoding WireGuard configuration for chunk $CHUNK..."
-            echo "$CONFIG" | base64 -d > wg0.conf
-            sudo chmod 600 wg0.conf   # إزالة التحذير world accessible
-
-            echo "🔄 Bringing up WireGuard interface..."
-            sudo wg-quick up ./wg0.conf 2>&1 | tee /tmp/wg.log
-
-            echo "⏳ Waiting for WireGuard tunnel to establish..."
-            VPN_UP=false
-            for i in {1..30}; do
-              if ip addr show wg0 >/dev/null 2>&1; then
-                WG_IP=$(ip -4 addr show wg0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
-                if [ -n "$WG_IP" ] && [ "$WG_IP" != "0.0.0.0" ]; then
-                  VPN_UP=true
-                  break
-                fi
-              fi
-              sleep 2
-            done
-
-            if [ "$VPN_UP" = true ]; then
-              PUBLIC_IP=$(curl -s --max-time 5 --interface wg0 ifconfig.me || curl -s --max-time 5 --interface wg0 icanhazip.com)
-              echo "✅ WireGuard tunnel is up. Public IP through VPN: $PUBLIC_IP"
-              echo "🔍 Interface details:"
-              ip addr show wg0
-              sudo wg show wg0
-            else
-              echo "❌ WireGuard tunnel did not come up within 60s. Traffic will use GitHub's public IP instead."
-              echo "--- Last WireGuard log lines ---"
-              cat /tmp/wg.log || true
-            fi
-          else
-            echo "⚠️  No VPN config found for chunk $CHUNK. Skipping VPN."
-          fi
-
-      # ----------------------------------------------------------------------
-      # تشغيل PureDNS Brute Force (تم حذف --wildcard-threshold)
-      # ----------------------------------------------------------------------
       - name: Execute PureDNS Brute Force
         env:
           TARGET: ${{ inputs.target_domain }}
@@ -197,9 +119,6 @@ jobs:
             -w "found_subs_${CHUNK}.txt" \
             --debug
 
-      # ----------------------------------------------------------------------
-      # معالجة النتائج
-      # ----------------------------------------------------------------------
       - name: Process Results
         env:
           CHUNK: ${{ matrix.chunk }}
@@ -214,18 +133,12 @@ jobs:
             echo "ℹ️ No valid subdomains found in chunk ${CHUNK}."
           fi
 
-      # ----------------------------------------------------------------------
-      # رفع النتائج
-      # ----------------------------------------------------------------------
       - name: Upload Discovered Subdomains (Chunk ${{ matrix.chunk }})
         uses: actions/upload-artifact@v4
         with:
           name: discovered-subs-chunk-${{ matrix.chunk }}
           path: live_subdomains_${{ matrix.chunk }}.txt
 
-  # --------------------------------------------------------------------------
-  # دمج جميع النتائج
-  # --------------------------------------------------------------------------
   merge-results:
     name: Merge All Results
     needs: bruteforce
